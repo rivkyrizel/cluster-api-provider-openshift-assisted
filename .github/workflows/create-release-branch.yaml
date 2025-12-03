@@ -1,0 +1,82 @@
+name: Release Branch Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number (e.g., 2.11)"
+        required: true
+        type: string
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "automation@example.com"
+          git config --global user.name "Automation Bot"
+
+      - name: Create new branch
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          TARGET_BRANCH="backplane-${VERSION}"
+          git checkout master
+          git pull
+          git checkout -B "${TARGET_BRANCH}"
+          git push origin "${TARGET_BRANCH}" --force
+
+      - name: Update Tekton YAML files, sync-branch.yaml and renovate.json
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          TARGET_BRANCH="backplane-${VERSION}"
+          PREVIOUS_BRANCH="backplane-$(echo "$VERSION" | awk -F. '{printf "%d.%d",$1,$2-1}')"
+
+          short_version=${VERSION//.}
+
+          for f in $(ls -1 .tekton); do
+              in="./.tekton/${f}"
+              out=$(echo "${in}" | sed "s/mce-[0-9]\+/mce-${short_version}/g")
+              if [ "$in" != "$out" ]; then
+                  git mv "${in}" "${out}"
+                  sed -i "s/mce-[0-9]\+/mce-${short_version}/g" "${out}"
+                  sed -i "s/${PREVIOUS_BRANCH}/${TARGET_BRANCH}/g" "${out}"
+                  git add "${out}"
+              else
+                  echo "Skipping $f - no version match"
+              fi
+          done
+
+          sed -i "s/^  TARGET_BRANCH: .*/  TARGET_BRANCH: ${TARGET_BRANCH}/" .github/workflows/sync-branch.yaml
+          git add .github/workflows/sync-branch.yaml
+
+          # Update renovate.json
+          cat renovate.json | jq '.baseBranchPatterns += ["'${PREVIOUS_BRANCH}'"]' > renovate.updated.json
+          cp renovate.updated.json renovate.json
+          git add renovate.json
+
+          git commit -m "Prepare release branch ${TARGET_BRANCH} with updated Tekton YAML, sync-branch.yaml and renovate.json" || echo "No changes to commit"
+          git push origin "${TARGET_BRANCH}"
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          TARGET_BRANCH="backplane-${VERSION}"
+
+          PR_NUMBER=$(gh pr list --head "${TARGET_BRANCH}" --json number -q '.[0].number')
+          if [ -z "$PR_NUMBER" ]; then
+            gh pr create \
+              --head "${TARGET_BRANCH}" \
+              --base master \
+              --title "Release ${TARGET_BRANCH}" \
+              --body "Automated PR for release branch ${TARGET_BRANCH}"
+          else
+            echo "PR #${PR_NUMBER} already exists"
+          fi
