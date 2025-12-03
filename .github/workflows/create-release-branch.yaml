@@ -1,0 +1,109 @@
+---
+name: Create New Release Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 2.12, 2.13)'
+        required: true
+        type: string
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.generate_token.outputs.token }}
+
+      - name: Set up variables
+        id: vars
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          TARGET_BRANCH="backplane-${VERSION}"
+          PREVIOUS_VERSION=$(echo "${VERSION}" | awk -F. '{print $1"."$2-1}')
+          PREVIOUS_BRANCH="backplane-${PREVIOUS_VERSION}"
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "capi-openshift-assisted@redhat.com"
+          git config --global user.name "CAPOA GitHub Action"
+
+      - name: Run hack/branch script
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+
+          # Run the script with automated yes responses using echo
+          echo -e "y\ny" | bash hack/branch "${VERSION}"
+
+      - name: Get or Create PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          TARGET_BRANCH="${{ steps.vars.outputs.target_branch }}"
+
+          PR_NUMBER=$(gh pr view "${TARGET_BRANCH}" --json number -q .number 2>/dev/null || echo "")
+
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "PR not found, creating a new one from ${TARGET_BRANCH} to ${TARGET_BRANCH}..."
+            PR_NUMBER=$(gh pr create \
+              --head "${TARGET_BRANCH}" \
+              --base "${TARGET_BRANCH}" \
+              --title "Fast-forward ${TARGET_BRANCH}" \
+              --body "Automated PR to fast-forward ${TARGET_BRANCH}" \
+              --json number -q .number)
+
+            if [ -z "${PR_NUMBER}" ]; then
+              echo "Failed to create PR"
+              echo "number=N/A" >> $GITHUB_OUTPUT
+            else
+              echo "Created PR #${PR_NUMBER}"
+              echo "number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "PR #${PR_NUMBER} already exists"
+            echo "number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Release Branch Creation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Ran hack/branch script for version ${{ github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Created PR branch \`${{ steps.vars.outputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Created release branch \`${{ steps.vars.outputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.pr.outputs.number }}" != "N/A" ]; then
+            echo "✅ Created PR #${{ steps.pr.outputs.number }}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Changes made:" >> $GITHUB_STEP_SUMMARY
+          echo "- Renamed .tekton files (mce-211 → mce-${{ github.event.inputs.version }})" >> $GITHUB_STEP_SUMMARY
+          echo "- Updated branch references (${{ steps.vars.outputs.previous_branch }} → ${{ steps.vars.outputs.target_branch }})" >> $GITHUB_STEP_SUMMARY
+          echo "- Added ${{ steps.vars.outputs.previous_branch }} to renovate.json" >> $GITHUB_STEP_SUMMARY
+          echo "- Updated sync-branch.yaml to target ${{ steps.vars.outputs.target_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps:" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.pr.outputs.number }}" != "N/A" ]; then
+            echo "1. Review and merge PR #${{ steps.pr.outputs.number }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "1. Check the Actions log for any errors" >> $GITHUB_STEP_SUMMARY
+            echo "2. Verify the PR was created for branch \`${{ steps.vars.outputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "2. The \`${{ steps.vars.outputs.target_branch }}\` branch is now the active fast-forward branch" >> $GITHUB_STEP_SUMMARY
+          echo "3. The \`${{ steps.vars.outputs.previous_branch }}\` branch is now frozen" >> $GITHUB_STEP_SUMMARY
