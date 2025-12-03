@@ -1,0 +1,100 @@
+---
+name: Create New Release Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 2.12, 2.13)'
+        required: true
+        type: string
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.generate_token.outputs.token }}
+
+      - name: Set up variables
+        id: vars
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          TARGET_BRANCH="backplane-${VERSION}"
+          PREVIOUS_VERSION=$(echo "${VERSION}" | awk -F. '{print $1"."$2-1}')
+          PREVIOUS_BRANCH="backplane-${PREVIOUS_VERSION}"
+          echo "target_branch=${TARGET_BRANCH}" >> $GITHUB_OUTPUT
+          echo "previous_branch=${PREVIOUS_BRANCH}" >> $GITHUB_OUTPUT
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "capi-openshift-assisted@redhat.com"
+          git config --global user.name "CAPOA GitHub Action"
+
+      - name: Run hack/branch script
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          # Run the script with automated yes responses using echo
+          echo -e "y\ny" | bash hack/branch "${VERSION}"
+
+      - name: Push branch
+        run: |
+          TARGET_BRANCH="${{ steps.vars.outputs.target_branch }}"
+          git checkout -B "${TARGET_BRANCH}"
+          git push origin "${TARGET_BRANCH}" --force
+
+      - name: Get or Create PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          TARGET_BRANCH="${{ steps.vars.outputs.target_branch }}"
+
+          # Check if PR exists
+          PR_NUMBER=$(gh pr list --head "${TARGET_BRANCH}" --json number -q '.[0].number' 2>/dev/null || echo "")
+
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "PR not found, creating a new one from ${TARGET_BRANCH} to ${TARGET_BRANCH}..."
+            
+            # Create PR and capture URL
+            PR_URL=$(gh pr create \
+              --head "${TARGET_BRANCH}" \
+              --base "${TARGET_BRANCH}" \
+              --title "Fast-forward ${TARGET_BRANCH}" \
+              --body "Automated PR to fast-forward ${TARGET_BRANCH}" \
+              --web false)
+
+            if [ -z "${PR_URL}" ]; then
+              echo "Failed to create PR"
+              echo "number=N/A" >> $GITHUB_OUTPUT
+            else
+              # Extract PR number from URL
+              PR_NUMBER=$(basename "${PR_URL}")
+              echo "Created PR #${PR_NUMBER}"
+              echo "number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "PR #${PR_NUMBER} already exists"
+            echo "number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Release Branch Creation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Ran hack/branch script for version ${{ github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Created PR branch \`${{ steps.vars.outputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Created release branch \`${{ steps.vars.outputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.pr.outputs.number }}" != "N/A" ]; then
