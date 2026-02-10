@@ -143,10 +143,26 @@ if ! grep -q "TARGET_BRANCH: ${next_branch}" "${SYNC_BRANCH_FILE}"; then
 fi
 
 git add "${SYNC_BRANCH_FILE}"
+
+# Update cpe label version in Dockerfiles
+for df in Dockerfile.j2 Dockerfile.bootstrap-provider Dockerfile.controlplane-provider; do
+    if [ -f "${df}" ]; then
+        if grep -q "multicluster_engine:${freeze_version}" "${df}"; then
+            sed -i "s/multicluster_engine:${freeze_version}/multicluster_engine:${next_version}/g" "${df}"
+            git add "${df}"
+            echo "Updated cpe label in ${df}"
+        else
+            echo "Warning: cpe label with version ${freeze_version} not found in ${df}"
+        fi
+    else
+        echo "Note: ${df} does not exist, skipping"
+    fi
+done
+
 # commit the changes
 
 if [[ "${CI:-}" == "true" ]]; then
-    if git commit -m "Prepare release branch ${next_branch} with updated Tekton YAML, sync-branch.yaml and renovate.json"; then
+    if git commit -m "Prepare release branch ${next_branch} with updated Tekton YAML, Dockerfiles, sync-branch.yaml and renovate.json"; then
         echo "Changes committed successfully"
     else
         echo "No changes to commit"
